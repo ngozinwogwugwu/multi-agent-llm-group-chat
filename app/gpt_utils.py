@@ -93,54 +93,110 @@ def process_bot_responses(text, channel_id, user_message, db, slack_client, logg
         logger: The logger instance
     """
     from app.models import SlackBot, Message
+    import json
 
     # Get all bots
     all_bots = SlackBot.query.all()
-    logger.info(f"Asking all {len(all_bots)} bots for responses")
+    logger.info(f"Found {len(all_bots)} bots")
 
-    # Process each bot
+    # Create a dictionary of bot contexts
+    bot_contexts = {}
+    bot_names = {}
     for bot in all_bots:
-        logger.info(f"Processing response for bot: {bot.name}")
-        # Get the bot's documents for context
         documents = bot.documents
         context = " ".join([doc.content for doc in documents])
-        logger.info(f"Context length: {len(context)} characters")
+        bot_contexts[bot.id] = context
+        bot_names[bot.id] = bot.name
 
-        try:
-            # Generate a response using OpenAI
-            logger.info(f"Calling OpenAI API for bot {bot.name}")
-            response = ask_gpt(text, context, bot.name, bot.id, channel_id)
-            logger.info(f"Received response from OpenAI: {response[:100]}...")
+    # Create a prompt to determine which bot should respond
+    bot_descriptions = "\n".join(
+        [
+            f"- Bot {bot.id} ({bot.name}): {bot_contexts[bot.id][:200]}..."
+            for bot in all_bots
+        ]
+    )
 
-            # Format the response to include the bot's name
-            formatted_response = f"*{bot.name}*: {response}"
+    api_key = os.environ.get("OPENAI_API_KEY")
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
 
-            # Send the response back to Slack
-            logger.info(f"Sending response to Slack channel {channel_id}")
-            slack_response = slack_client.chat_postMessage(
-                channel=channel_id,
-                text=formatted_response,
-                # thread_ts=user_message.timestamp,  # Uncomment to make it a thread reply
-            )
-            logger.info(f"Response sent to Slack, ts: {slack_response.get('ts')}")
+    router_prompt = {
+        "model": "gpt-4o",
+        "messages": [
+            {
+                "role": "system",
+                "content": f"""You are a router that determines which specialized bot should respond to a user query.
+                You have access to the following bots:
+                {bot_descriptions}
+                
+                Analyze the user's query and determine which single bot is best suited to respond.
+                Even if multiple bots could potentially answer, you must select the single most appropriate bot.
+                
+                Return a JSON object with the following fields:
+                - bot_id: The ID of the bot that should respond (integer)
+                - bot_name: The name of the bot that should respond (string)
+                - response: The response to the user's query (string)
+                - confidence: Confidence level (0-1) that this bot is the right one to answer (number)
+                """,
+            },
+            {"role": "user", "content": text},
+        ],
+        "response_format": {"type": "json_object"},
+    }
 
-            # Store the bot's response in the database
-            bot_message = Message(
-                channel=channel_id,
-                text=response,
-                timestamp=slack_response.get("ts"),
-                bot_id=bot.id,
-                is_bot=True,
-            )
-            db.session.add(bot_message)
-            db.session.commit()
-            logger.info(f"Bot response saved with ID: {bot_message.id}")
+    try:
+        # Call OpenAI to determine which bot should respond
+        logger.info("Calling OpenAI API to determine which bot should respond")
+        response = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers=headers,
+            data=json.dumps(router_prompt),
+        )
 
-        except Exception as e:
-            logger.error(
-                f"Error generating or sending response: {str(e)}",
-                exc_info=True,
-            )
+        if response.status_code != 200:
+            logger.error(f"Error from OpenAI API: {response.text}")
+            return
+
+        router_response = response.json()["choices"][0]["message"]["content"]
+        router_data = json.loads(router_response)
+
+        logger.info(f"Router response: {router_data}")
+
+        # Get the selected bot's information
+        bot_id = router_data["bot_id"]
+        bot_name = router_data["bot_name"]
+        bot_response = router_data["response"]
+        confidence = router_data["confidence"]
+
+        logger.info(
+            f"Selected bot: {bot_name} (ID: {bot_id}) with confidence: {confidence}"
+        )
+
+        # Format and send the response
+        formatted_response = f"*{bot_name}*: {bot_response}"
+
+        slack_response = slack_client.chat_postMessage(
+            channel=channel_id,
+            text=formatted_response,
+            # thread_ts=user_message.timestamp,  # Uncomment to make it a thread reply
+        )
+
+        # Store the bot's response in the database
+        bot_message = Message(
+            channel=channel_id,
+            text=bot_response,
+            timestamp=slack_response.get("ts"),
+            bot_id=bot_id,
+            is_bot=True,
+        )
+        db.session.add(bot_message)
+        db.session.commit()
+        logger.info(f"Bot response saved with ID: {bot_message.id}")
+
+    except Exception as e:
+        logger.error(
+            f"Error in router process: {str(e)}",
+            exc_info=True,
+        )
 
 
 def get_or_create_user(user_id, slack_client, db, logger):
