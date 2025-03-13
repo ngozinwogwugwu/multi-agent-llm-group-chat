@@ -1,4 +1,12 @@
-from flask import Blueprint, jsonify, request, render_template, redirect, url_for
+from flask import (
+    Blueprint,
+    jsonify,
+    request,
+    render_template,
+    redirect,
+    url_for,
+    Response,
+)
 from slack_sdk.errors import SlackApiError
 import openai  # Correct import for the OpenAI SDK
 from app import db, slack_client
@@ -9,6 +17,7 @@ from slack_sdk.signature import SignatureVerifier
 import logging
 import json
 import re
+from threading import Thread
 
 main_bp = Blueprint("main", __name__)
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
@@ -63,26 +72,35 @@ def send_message():
 @main_bp.route("/slack/events", methods=["POST"])
 def slack_events():
     logger.info("Received request to /slack/events endpoint")
-    logger.info(f"Headers: {dict(request.headers)}")
-
-    # Log the raw request data
-    raw_data = request.get_data()
-    logger.info(f"Raw request data: {raw_data}")
-
-    # Verify the request signature
-    # if not signature_verifier.is_valid_request(raw_data, request.headers):
-    #     logger.warning("Invalid request signature")
-    #     return jsonify({"error": "Invalid request signature"}), 403
 
     # Get the JSON data from the request
     data = request.get_json()
-    logger.info(f"JSON data: {json.dumps(data, indent=2)}")
 
-    # Verify the request comes from Slack
+    # Handle challenge requests immediately
     if "challenge" in data:
-        # This is a verification request when setting up the Events API
         logger.info("Received challenge request from Slack")
         return jsonify({"challenge": data["challenge"]})
+
+    # Start a background thread to process the event
+    # This allows us to return a 200 response immediately
+    def process_event_async(event_data):
+        try:
+            # Process the event
+            process_slack_event(event_data)
+        except Exception as e:
+            logger.error(f"Error processing event: {str(e)}", exc_info=True)
+
+    # Start the background processing
+    Thread(target=process_event_async, args=(data,)).start()
+
+    # Return 200 OK immediately
+    return "", 200
+
+
+# Extract the event processing logic into a separate function
+def process_slack_event(data):
+    # Log the raw request data
+    logger.info(f"Processing event data: {json.dumps(data, indent=2)}")
 
     # Process the event
     if "event" in data:
@@ -103,6 +121,30 @@ def slack_events():
             user_id = event.get("user")
             text = event.get("text", "")
             ts = event.get("ts")
+            client_msg_id = event.get("client_msg_id")
+
+            # Check if this is a duplicate message using client_msg_id (most reliable)
+            if client_msg_id:
+                existing_message = Message.query.filter_by(
+                    client_msg_id=client_msg_id
+                ).first()
+
+                if existing_message:
+                    logger.info(
+                        f"Duplicate message detected with client_msg_id {client_msg_id}, skipping processing"
+                    )
+                    return
+            # Fallback to timestamp-based deduplication if client_msg_id is not available
+            else:
+                existing_message = Message.query.filter_by(
+                    channel=channel_id, timestamp=ts, is_bot=False
+                ).first()
+
+                if existing_message:
+                    logger.info(
+                        f"Duplicate message detected with timestamp {ts}, skipping processing"
+                    )
+                    return
 
             logger.info(
                 f"Received message from user {user_id} in channel {channel_id}: {text}"
@@ -135,14 +177,14 @@ def slack_events():
                     db.session.add(user)
                     db.session.commit()
 
-            # Create and save the message
-            logger.info(f"Saving message to database")
+            # Create and save the message with client_msg_id
             message = Message(
                 channel=channel_id,
                 text=text,
                 timestamp=ts,
                 user_id=user.id,
                 is_bot=False,
+                client_msg_id=client_msg_id,  # Store the client_msg_id
             )
             db.session.add(message)
             db.session.commit()
@@ -194,7 +236,7 @@ def slack_events():
                     try:
                         # Generate a response using OpenAI
                         logger.info(f"Calling OpenAI API for bot {bot.name}")
-                        response = ask_gpt(context, bot.name)
+                        response = ask_gpt(text, context, bot.name)
                         logger.info(
                             f"Received response from OpenAI: {response[:100]}..."
                         )
@@ -237,7 +279,6 @@ def slack_events():
         logger.info("No event data in the request")
 
     logger.info("Finished processing request")
-    return "", 200  # Return empty 200 response to acknowledge receipt
 
 
 # Dashboard

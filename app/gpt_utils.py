@@ -3,7 +3,7 @@ import requests
 import json
 
 
-def ask_gpt(context, bot_name):
+def ask_gpt(text, context, bot_name):
     """
     Send a request to OpenAI's Chat Completions API
 
@@ -27,7 +27,7 @@ def ask_gpt(context, bot_name):
             },
             {
                 "role": "user",
-                "content": f"Given the following context: {context}, what do you think?",
+                "content": f"{text}!! Given the following context: {context}",
             },
         ],
     }
