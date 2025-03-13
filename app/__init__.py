@@ -31,8 +31,9 @@ def create_app():
     migrate.init_app(app, db)
 
     # Register blueprints
-    from app.routes import main_bp
+    from app.routes import main_bp, admin_bp
 
     app.register_blueprint(main_bp)
+    app.register_blueprint(admin_bp)
 
     return app
