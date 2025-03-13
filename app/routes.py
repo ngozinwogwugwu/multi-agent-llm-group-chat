@@ -1,7 +1,7 @@
 from flask import Blueprint, jsonify, request, render_template, redirect, url_for
 from slack_sdk.errors import SlackApiError
 from app import db, slack_client
-from app.models import User, SlackBot, Message
+from app.models import User, SlackBot, Message, Document
 
 main_bp = Blueprint("main", __name__)
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
@@ -49,8 +49,13 @@ def dashboard():
     users = User.query.all()
     bots = SlackBot.query.all()
     messages = Message.query.order_by(Message.created_at.desc()).limit(10).all()
+    documents = Document.query.order_by(Document.created_at.desc()).limit(10).all()
     return render_template(
-        "admin/dashboard.html", users=users, bots=bots, messages=messages
+        "admin/dashboard.html",
+        users=users,
+        bots=bots,
+        messages=messages,
+        documents=documents,
     )
 
 
@@ -129,3 +134,48 @@ def delete_message(id):
     db.session.delete(message)
     db.session.commit()
     return redirect(url_for("admin.list_messages"))
+
+
+# Documents CRUD
+@admin_bp.route("/documents")
+def list_documents():
+    documents = Document.query.order_by(Document.created_at.desc()).all()
+    return render_template("admin/documents/list.html", documents=documents)
+
+
+@admin_bp.route("/documents/new", methods=["GET", "POST"])
+def new_document():
+    if request.method == "POST":
+        document = Document(
+            title=request.form["title"],
+            content=request.form["content"],
+            bot_id=request.form["bot_id"],
+        )
+        db.session.add(document)
+        db.session.commit()
+        return redirect(url_for("admin.list_documents"))
+
+    bots = SlackBot.query.all()
+    return render_template("admin/documents/new.html", bots=bots)
+
+
+@admin_bp.route("/documents/<int:id>", methods=["GET", "POST"])
+def edit_document(id):
+    document = Document.query.get_or_404(id)
+    if request.method == "POST":
+        document.title = request.form["title"]
+        document.content = request.form["content"]
+        document.bot_id = request.form["bot_id"]
+        db.session.commit()
+        return redirect(url_for("admin.list_documents"))
+
+    bots = SlackBot.query.all()
+    return render_template("admin/documents/edit.html", document=document, bots=bots)
+
+
+@admin_bp.route("/documents/<int:id>/delete", methods=["POST"])
+def delete_document(id):
+    document = Document.query.get_or_404(id)
+    db.session.delete(document)
+    db.session.commit()
+    return redirect(url_for("admin.list_documents"))

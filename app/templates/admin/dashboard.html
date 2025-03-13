@@ -51,6 +51,20 @@
             </div>
           </div>
         </div>
+
+        <div class="col-md-3">
+          <div class="card">
+            <div class="card-body">
+              <h5 class="card-title">Documents</h5>
+              <p class="card-text">Total Documents: {{ documents|length }}</p>
+              <a
+                href="{{ url_for('admin.list_documents') }}"
+                class="btn btn-primary"
+                >Manage Documents</a
+              >
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </body>
