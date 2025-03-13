@@ -1,7 +1,8 @@
 import os
 import requests
 import json
-from app.models import Message
+from app.models import Message, User
+from slack_sdk.errors import SlackApiError
 
 
 def ask_gpt(text, context, bot_name, bot_id=None, channel=None):
@@ -77,3 +78,142 @@ def ask_gpt(text, context, bot_name, bot_id=None, channel=None):
         return response.json()["choices"][0]["message"]["content"]
     else:
         raise Exception(f"Error from OpenAI API: {response.text}")
+
+
+def process_bot_responses(text, channel_id, user_message, db, slack_client, logger):
+    """
+    Process responses from all bots for a given user message
+
+    Args:
+        text (str): The user's message text
+        channel_id (str): The Slack channel ID
+        user_message (Message): The saved user message object
+        db: The database session
+        slack_client: The Slack client
+        logger: The logger instance
+    """
+    from app.models import SlackBot, Message
+
+    # Get all bots
+    all_bots = SlackBot.query.all()
+    logger.info(f"Asking all {len(all_bots)} bots for responses")
+
+    # Process each bot
+    for bot in all_bots:
+        logger.info(f"Processing response for bot: {bot.name}")
+        # Get the bot's documents for context
+        documents = bot.documents
+        context = " ".join([doc.content for doc in documents])
+        logger.info(f"Context length: {len(context)} characters")
+
+        try:
+            # Generate a response using OpenAI
+            logger.info(f"Calling OpenAI API for bot {bot.name}")
+            response = ask_gpt(text, context, bot.name, bot.id, channel_id)
+            logger.info(f"Received response from OpenAI: {response[:100]}...")
+
+            # Format the response to include the bot's name
+            formatted_response = f"*{bot.name}*: {response}"
+
+            # Send the response back to Slack
+            logger.info(f"Sending response to Slack channel {channel_id}")
+            slack_response = slack_client.chat_postMessage(
+                channel=channel_id,
+                text=formatted_response,
+                # thread_ts=user_message.timestamp,  # Uncomment to make it a thread reply
+            )
+            logger.info(f"Response sent to Slack, ts: {slack_response.get('ts')}")
+
+            # Store the bot's response in the database
+            bot_message = Message(
+                channel=channel_id,
+                text=response,
+                timestamp=slack_response.get("ts"),
+                bot_id=bot.id,
+                is_bot=True,
+            )
+            db.session.add(bot_message)
+            db.session.commit()
+            logger.info(f"Bot response saved with ID: {bot_message.id}")
+
+        except Exception as e:
+            logger.error(
+                f"Error generating or sending response: {str(e)}",
+                exc_info=True,
+            )
+
+
+def get_or_create_user(user_id, slack_client, db, logger):
+    """
+    Get an existing user or create a new one if they don't exist
+
+    Args:
+        user_id (str): The Slack user ID
+        slack_client: The Slack client
+        db: The database session
+        logger: The logger instance
+
+    Returns:
+        User: The user object
+    """
+    # Check if user exists
+    user = User.query.filter_by(slack_user_id=user_id).first()
+
+    # If user doesn't exist, create a new user record
+    if not user:
+        logger.info(f"User {user_id} not found in database, creating new user record")
+        try:
+            # Fetch user info from Slack API
+            user_info = slack_client.users_info(user=user_id)
+            username = user_info["user"]["name"]
+            email = user_info["user"]["profile"].get("email")
+
+            logger.info(f"Creating user with username: {username}, email: {email}")
+            user = User(slack_user_id=user_id, username=username, email=email)
+            db.session.add(user)
+            db.session.commit()
+        except SlackApiError as e:
+            logger.error(f"Error fetching user info: {e}")
+            username = f"user_{user_id}"
+            user = User(slack_user_id=user_id, username=username)
+            db.session.add(user)
+            db.session.commit()
+
+    return user
+
+
+def check_duplicate_message(channel_id, ts, client_msg_id, logger):
+    """
+    Check if a message is a duplicate based on client_msg_id or timestamp
+
+    Args:
+        channel_id (str): The Slack channel ID
+        ts (str): The message timestamp
+        client_msg_id (str): The client message ID
+        logger: The logger instance
+
+    Returns:
+        bool: True if duplicate, False otherwise
+    """
+    # Check if this is a duplicate message using client_msg_id (most reliable)
+    if client_msg_id:
+        existing_message = Message.query.filter_by(client_msg_id=client_msg_id).first()
+
+        if existing_message:
+            logger.info(
+                f"Duplicate message detected with client_msg_id {client_msg_id}, skipping processing"
+            )
+            return True
+    # Fallback to timestamp-based deduplication if client_msg_id is not available
+    else:
+        existing_message = Message.query.filter_by(
+            channel=channel_id, timestamp=ts, is_bot=False
+        ).first()
+
+        if existing_message:
+            logger.info(
+                f"Duplicate message detected with timestamp {ts}, skipping processing"
+            )
+            return True
+
+    return False

@@ -13,7 +13,13 @@ from app import db, slack_client
 from flask import current_app
 from app.models import User, SlackBot, Message, Document
 import os
-from app.gpt_utils import ask_gpt
+from app.gpt_utils import (
+    ask_gpt,
+    process_bot_responses,
+    get_or_create_user,
+    check_duplicate_message,
+)
+
 from slack_sdk.signature import SignatureVerifier
 import logging
 import json
@@ -108,6 +114,11 @@ def slack_events():
 def process_slack_event(event_data):
     # Import current_app instead of app
     from flask import current_app
+    from app.gpt_utils import (
+        process_bot_responses,
+        get_or_create_user,
+        check_duplicate_message,
+    )
 
     # Use current_app context for database operations
     with current_app.app_context():
@@ -135,61 +146,16 @@ def process_slack_event(event_data):
                 ts = event.get("ts")
                 client_msg_id = event.get("client_msg_id")
 
-                # Check if this is a duplicate message using client_msg_id (most reliable)
-                if client_msg_id:
-                    existing_message = Message.query.filter_by(
-                        client_msg_id=client_msg_id
-                    ).first()
-
-                    if existing_message:
-                        logger.info(
-                            f"Duplicate message detected with client_msg_id {client_msg_id}, skipping processing"
-                        )
-                        return
-                # Fallback to timestamp-based deduplication if client_msg_id is not available
-                else:
-                    existing_message = Message.query.filter_by(
-                        channel=channel_id, timestamp=ts, is_bot=False
-                    ).first()
-
-                    if existing_message:
-                        logger.info(
-                            f"Duplicate message detected with timestamp {ts}, skipping processing"
-                        )
-                        return
+                # Check for duplicate messages
+                if check_duplicate_message(channel_id, ts, client_msg_id, logger):
+                    return
 
                 logger.info(
                     f"Received message from user {user_id} in channel {channel_id}: {text}"
                 )
 
-                # Store the message in the database
-                user = User.query.filter_by(slack_user_id=user_id).first()
-
-                # If user doesn't exist, create a new user record
-                if not user:
-                    logger.info(
-                        f"User {user_id} not found in database, creating new user record"
-                    )
-                    # You might want to fetch user info from Slack API
-                    try:
-                        user_info = slack_client.users_info(user=user_id)
-                        username = user_info["user"]["name"]
-                        email = user_info["user"]["profile"].get("email")
-
-                        logger.info(
-                            f"Creating user with username: {username}, email: {email}"
-                        )
-                        user = User(
-                            slack_user_id=user_id, username=username, email=email
-                        )
-                        db.session.add(user)
-                        db.session.commit()
-                    except SlackApiError as e:
-                        logger.error(f"Error fetching user info: {e}")
-                        username = f"user_{user_id}"
-                        user = User(slack_user_id=user_id, username=username)
-                        db.session.add(user)
-                        db.session.commit()
+                # Get or create user
+                user = get_or_create_user(user_id, slack_client, db, logger)
 
                 # Create and save the message with client_msg_id
                 message = Message(
@@ -204,87 +170,10 @@ def process_slack_event(event_data):
                 db.session.commit()
                 logger.info(f"Message saved with ID: {message.id}")
 
-                # # For app_mention events, extract the mentioned bot directly from the event
-                # if event.get("type") == "app_mention":
-                #     # Get the bot's user ID from the message
-                #     mentioned_bot_id = None
-                #     # Try to extract the bot ID from the text (format: <@BOT_ID>)
-                #     match = re.search(r"<@([A-Z0-9]+)>", text)
-                #     if match:
-                #         mentioned_bot_id = match.group(1)
-                #         logger.info(f"Bot mentioned with ID: {mentioned_bot_id}")
-
-                #         # Find the bot in the database
-                #         bot = SlackBot.query.filter_by(bot_id=mentioned_bot_id).first()
-                #         if bot:
-                #             logger.info(f"Found bot in database: {bot.name}")
-                #             mentioned_bots = [bot]
-                #         else:
-                #             logger.warning(
-                #                 f"Bot with ID {mentioned_bot_id} not found in database"
-                #             )
-                #             mentioned_bots = []
-                #     else:
-                #         logger.warning("Could not extract bot ID from app_mention text")
-                #         mentioned_bots = []
-                # else:
-                #     # For regular messages, check if any bot was mentioned by name
-                #     bots = SlackBot.query.all()
-                #     mentioned_bots = [
-                #         bot for bot in bots if bot.name.lower() in text.lower()
-                #     ]
-
-                # Get all bots instead of just the mentioned ones
-                all_bots = SlackBot.query.all()
-                logger.info(f"Asking all {len(all_bots)} bots for responses")
-
-                # Process each bot
-                for bot in all_bots:
-                    logger.info(f"Processing response for bot: {bot.name}")
-                    # Get the bot's documents for context
-                    documents = bot.documents
-                    context = " ".join([doc.content for doc in documents])
-                    logger.info(f"Context length: {len(context)} characters")
-
-                    try:
-                        # Generate a response using OpenAI
-                        logger.info(f"Calling OpenAI API for bot {bot.name}")
-                        response = ask_gpt(text, context, bot.name)
-                        logger.info(
-                            f"Received response from OpenAI: {response[:100]}..."
-                        )
-
-                        # Format the response to include the bot's name
-                        formatted_response = f"*{bot.name}*: {response}"
-
-                        # Send the response back to Slack
-                        logger.info(f"Sending response to Slack channel {channel_id}")
-                        slack_response = slack_client.chat_postMessage(
-                            channel=channel_id,
-                            text=formatted_response,
-                            # thread_ts=ts,  # This will make it a thread reply
-                        )
-                        logger.info(
-                            f"Response sent to Slack, ts: {slack_response.get('ts')}"
-                        )
-
-                        # Store the bot's response in the database
-                        bot_message = Message(
-                            channel=channel_id,
-                            text=response,
-                            timestamp=slack_response.get("ts"),
-                            bot_id=bot.id,
-                            is_bot=True,
-                        )
-                        db.session.add(bot_message)
-                        db.session.commit()
-                        logger.info(f"Bot response saved with ID: {bot_message.id}")
-
-                    except Exception as e:
-                        logger.error(
-                            f"Error generating or sending response: {str(e)}",
-                            exc_info=True,
-                        )
+                # Use the utility function to process bot responses
+                process_bot_responses(
+                    text, channel_id, message, db, slack_client, logger
+                )
             else:
                 logger.info(
                     "Ignoring event: not a user message/app_mention or sent by a bot"
