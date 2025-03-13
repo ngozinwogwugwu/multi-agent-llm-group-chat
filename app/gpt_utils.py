@@ -1,9 +1,10 @@
 import os
 import requests
 import json
+from app.models import Message
 
 
-def ask_gpt(text, context, bot_name):
+def ask_gpt(text, context, bot_name, bot_id=None, channel=None):
     """
     Send a request to OpenAI's Chat Completions API
 
@@ -11,6 +12,8 @@ def ask_gpt(text, context, bot_name):
         text (str): The user's query
         context (str): The context from bot documents
         bot_name (str): The name of the bot
+        bot_id (int, optional): The database ID of the bot
+        channel (str, optional): The Slack channel ID
 
     Returns:
         str: The response from GPT
@@ -18,6 +21,29 @@ def ask_gpt(text, context, bot_name):
     api_key = os.environ.get("OPENAI_API_KEY")
 
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+
+    # Get past 10 messages from this bot in the channel if bot_id and channel are provided
+    conversation_history = ""
+    if bot_id and channel:
+        past_messages = (
+            Message.query.filter_by(bot_id=bot_id, channel=channel)
+            .order_by(Message.created_at.desc())
+            .limit(10)
+            .all()
+        )
+
+        if past_messages:
+            conversation_history = "Recent conversation history:\n"
+            # Reverse to get chronological order
+            for msg in reversed(past_messages):
+                conversation_history += (
+                    f"{'Bot' if msg.is_bot else 'User'}: {msg.text}\n"
+                )
+
+    # Combine document context with conversation history
+    full_context = (
+        f"{context}\n\n{conversation_history}" if conversation_history else context
+    )
 
     data = {
         "model": "gpt-4o",
@@ -28,7 +54,7 @@ def ask_gpt(text, context, bot_name):
             },
             {
                 "role": "user",
-                "content": f"Here is some context information: {context}",
+                "content": f"Here is some context information: {full_context}",
             },
             {
                 "role": "assistant",

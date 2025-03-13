@@ -204,89 +204,87 @@ def process_slack_event(event_data):
                 db.session.commit()
                 logger.info(f"Message saved with ID: {message.id}")
 
-                # For app_mention events, extract the mentioned bot directly from the event
-                if event.get("type") == "app_mention":
-                    # Get the bot's user ID from the message
-                    mentioned_bot_id = None
-                    # Try to extract the bot ID from the text (format: <@BOT_ID>)
-                    match = re.search(r"<@([A-Z0-9]+)>", text)
-                    if match:
-                        mentioned_bot_id = match.group(1)
-                        logger.info(f"Bot mentioned with ID: {mentioned_bot_id}")
+                # # For app_mention events, extract the mentioned bot directly from the event
+                # if event.get("type") == "app_mention":
+                #     # Get the bot's user ID from the message
+                #     mentioned_bot_id = None
+                #     # Try to extract the bot ID from the text (format: <@BOT_ID>)
+                #     match = re.search(r"<@([A-Z0-9]+)>", text)
+                #     if match:
+                #         mentioned_bot_id = match.group(1)
+                #         logger.info(f"Bot mentioned with ID: {mentioned_bot_id}")
 
-                        # Find the bot in the database
-                        bot = SlackBot.query.filter_by(bot_id=mentioned_bot_id).first()
-                        if bot:
-                            logger.info(f"Found bot in database: {bot.name}")
-                            mentioned_bots = [bot]
-                        else:
-                            logger.warning(
-                                f"Bot with ID {mentioned_bot_id} not found in database"
-                            )
-                            mentioned_bots = []
-                    else:
-                        logger.warning("Could not extract bot ID from app_mention text")
-                        mentioned_bots = []
-                else:
-                    # For regular messages, check if any bot was mentioned by name
-                    bots = SlackBot.query.all()
-                    mentioned_bots = [
-                        bot for bot in bots if bot.name.lower() in text.lower()
-                    ]
+                #         # Find the bot in the database
+                #         bot = SlackBot.query.filter_by(bot_id=mentioned_bot_id).first()
+                #         if bot:
+                #             logger.info(f"Found bot in database: {bot.name}")
+                #             mentioned_bots = [bot]
+                #         else:
+                #             logger.warning(
+                #                 f"Bot with ID {mentioned_bot_id} not found in database"
+                #             )
+                #             mentioned_bots = []
+                #     else:
+                #         logger.warning("Could not extract bot ID from app_mention text")
+                #         mentioned_bots = []
+                # else:
+                #     # For regular messages, check if any bot was mentioned by name
+                #     bots = SlackBot.query.all()
+                #     mentioned_bots = [
+                #         bot for bot in bots if bot.name.lower() in text.lower()
+                #     ]
 
-                if mentioned_bots:
-                    logger.info(
-                        f"Bots mentioned in message: {[bot.name for bot in mentioned_bots]}"
-                    )
+                # Get all bots instead of just the mentioned ones
+                all_bots = SlackBot.query.all()
+                logger.info(f"Asking all {len(all_bots)} bots for responses")
 
-                    # Process each mentioned bot
-                    for bot in mentioned_bots:
-                        logger.info(f"Processing response for bot: {bot.name}")
-                        # Get the bot's documents for context
-                        documents = bot.documents
-                        context = " ".join([doc.content for doc in documents])
-                        logger.info(f"Context length: {len(context)} characters")
+                # Process each bot
+                for bot in all_bots:
+                    logger.info(f"Processing response for bot: {bot.name}")
+                    # Get the bot's documents for context
+                    documents = bot.documents
+                    context = " ".join([doc.content for doc in documents])
+                    logger.info(f"Context length: {len(context)} characters")
 
-                        try:
-                            # Generate a response using OpenAI
-                            logger.info(f"Calling OpenAI API for bot {bot.name}")
-                            response = ask_gpt(text, context, bot.name)
-                            logger.info(
-                                f"Received response from OpenAI: {response[:100]}..."
-                            )
+                    try:
+                        # Generate a response using OpenAI
+                        logger.info(f"Calling OpenAI API for bot {bot.name}")
+                        response = ask_gpt(text, context, bot.name)
+                        logger.info(
+                            f"Received response from OpenAI: {response[:100]}..."
+                        )
 
-                            # Send the response back to Slack
-                            logger.info(
-                                f"Sending response to Slack channel {channel_id}"
-                            )
-                            slack_response = slack_client.chat_postMessage(
-                                channel=channel_id,
-                                text=response,
-                                thread_ts=ts,  # This will make it a thread reply
-                            )
-                            logger.info(
-                                f"Response sent to Slack, ts: {slack_response.get('ts')}"
-                            )
+                        # Format the response to include the bot's name
+                        formatted_response = f"*{bot.name}*: {response}"
 
-                            # Store the bot's response in the database
-                            bot_message = Message(
-                                channel=channel_id,
-                                text=response,
-                                timestamp=slack_response.get("ts"),
-                                bot_id=bot.id,
-                                is_bot=True,
-                            )
-                            db.session.add(bot_message)
-                            db.session.commit()
-                            logger.info(f"Bot response saved with ID: {bot_message.id}")
+                        # Send the response back to Slack
+                        logger.info(f"Sending response to Slack channel {channel_id}")
+                        slack_response = slack_client.chat_postMessage(
+                            channel=channel_id,
+                            text=formatted_response,
+                            # thread_ts=ts,  # This will make it a thread reply
+                        )
+                        logger.info(
+                            f"Response sent to Slack, ts: {slack_response.get('ts')}"
+                        )
 
-                        except Exception as e:
-                            logger.error(
-                                f"Error generating or sending response: {str(e)}",
-                                exc_info=True,
-                            )
-                else:
-                    logger.info("No bots were mentioned in the message")
+                        # Store the bot's response in the database
+                        bot_message = Message(
+                            channel=channel_id,
+                            text=response,
+                            timestamp=slack_response.get("ts"),
+                            bot_id=bot.id,
+                            is_bot=True,
+                        )
+                        db.session.add(bot_message)
+                        db.session.commit()
+                        logger.info(f"Bot response saved with ID: {bot_message.id}")
+
+                    except Exception as e:
+                        logger.error(
+                            f"Error generating or sending response: {str(e)}",
+                            exc_info=True,
+                        )
             else:
                 logger.info(
                     "Ignoring event: not a user message/app_mention or sent by a bot"
@@ -410,8 +408,13 @@ def list_documents():
 @admin_bp.route("/documents/new", methods=["GET", "POST"])
 def new_document():
     if request.method == "POST":
+        # Truncate the title if it's too long
+        title = request.form["title"]
+        if len(title) > 200:
+            title = title[:197] + "..."
+
         document = Document(
-            title=request.form["title"],
+            title=title,
             content=request.form["content"],
             bot_id=request.form["bot_id"],
         )
@@ -427,7 +430,12 @@ def new_document():
 def edit_document(id):
     document = Document.query.get_or_404(id)
     if request.method == "POST":
-        document.title = request.form["title"]
+        # Truncate the title if it's too long
+        title = request.form["title"]
+        if len(title) > 200:
+            title = title[:197] + "..."
+
+        document.title = title
         document.content = request.form["content"]
         document.bot_id = request.form["bot_id"]
         db.session.commit()
