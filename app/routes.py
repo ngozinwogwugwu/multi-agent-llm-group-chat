@@ -1,10 +1,16 @@
 from flask import Blueprint, jsonify, request, render_template, redirect, url_for
 from slack_sdk.errors import SlackApiError
+import openai  # Correct import for the OpenAI SDK
 from app import db, slack_client
 from app.models import User, SlackBot, Message, Document
+import os
+from app.gpt_utils import ask_gpt
 
 main_bp = Blueprint("main", __name__)
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
+
+# Initialize OpenAI API key
+openai.api_key = os.environ["OPENAI_API_KEY"]
 
 
 @main_bp.route("/")
@@ -110,6 +116,16 @@ def delete_bot(id):
     return redirect(url_for("admin.list_bots"))
 
 
+@admin_bp.route("/bots/new", methods=["GET", "POST"])
+def new_bot():
+    if request.method == "POST":
+        bot = SlackBot(bot_id=request.form["bot_id"], name=request.form["name"])
+        db.session.add(bot)
+        db.session.commit()
+        return redirect(url_for("admin.list_bots"))
+    return render_template("admin/bots/new.html")
+
+
 # Messages CRUD
 @admin_bp.route("/messages")
 def list_messages():
@@ -179,3 +195,26 @@ def delete_document(id):
     db.session.delete(document)
     db.session.commit()
     return redirect(url_for("admin.list_documents"))
+
+
+@admin_bp.route("/ask_openai/<int:id>", methods=["POST"])
+def ask_openai(id):
+    # Retrieve the bot and its documents
+    bot = SlackBot.query.get_or_404(id)
+    documents = bot.documents
+
+    # Prepare the context from the documents
+    context = " ".join([doc.content for doc in documents])
+
+    # Call OpenAI API using our new function
+    try:
+        openai_response = ask_gpt(context, bot.name)
+
+        # Send the result to Slack
+        slack_client.chat_postMessage(
+            channel="#all-the-circuit-board",
+            text=f"OpenAI response for bot {bot.name}: {openai_response}",
+        )
+        return f"OpenAI response sent to Slack for bot {bot.name}."
+    except Exception as e:
+        return f"Error: {str(e)}"

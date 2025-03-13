@@ -19,6 +19,9 @@
       </nav>
 
       <h2>Slack Bots</h2>
+      <a href="{{ url_for('admin.new_bot') }}" class="btn btn-success mb-3"
+        >New Bot</a
+      >
 
       <table class="table table-striped">
         <thead>
@@ -54,6 +57,15 @@
                   onclick="return confirm('Are you sure?')"
                 >
                   Delete
+                </button>
+              </form>
+              <form
+                action="{{ url_for('admin.ask_openai', id=bot.id) }}"
+                method="POST"
+                class="d-inline"
+              >
+                <button type="submit" class="btn btn-sm btn-info">
+                  Ask OpenAI
                 </button>
               </form>
             </td>
