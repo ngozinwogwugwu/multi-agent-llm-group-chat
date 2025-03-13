@@ -134,7 +134,6 @@ def process_bot_responses(text, channel_id, user_message, db, slack_client, logg
                 Return a JSON object with the following fields:
                 - bot_id: The ID of the bot that should respond (integer)
                 - bot_name: The name of the bot that should respond (string)
-                - response: The response to the user's query (string)
                 - confidence: Confidence level (0-1) that this bot is the right one to answer (number)
                 """,
             },
@@ -164,12 +163,15 @@ def process_bot_responses(text, channel_id, user_message, db, slack_client, logg
         # Get the selected bot's information
         bot_id = router_data["bot_id"]
         bot_name = router_data["bot_name"]
-        bot_response = router_data["response"]
         confidence = router_data["confidence"]
 
         logger.info(
             f"Selected bot: {bot_name} (ID: {bot_id}) with confidence: {confidence}"
         )
+
+        # Use ask_gpt to get a response from the selected bot with its full context
+        bot_context = bot_contexts[bot_id]
+        bot_response = ask_gpt(text, bot_context, bot_name, bot_id, channel_id)
 
         # Format and send the response
         formatted_response = f"*{bot_name}*: {bot_response}"
