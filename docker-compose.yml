@@ -49,5 +49,15 @@ services:
       postgres:
         condition: service_healthy
 
+  ngrok:
+    image: ngrok/ngrok:latest
+    ports:
+      - "4040:4040"
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTH_TOKEN}
+    command: http --domain=notebook-digitizer-dev.ngrok.app web:8000
+    depends_on:
+      - web
+
 volumes:
   postgres_data:
