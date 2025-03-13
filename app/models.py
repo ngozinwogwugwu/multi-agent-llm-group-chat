@@ -40,6 +40,9 @@ class Message(db.Model):
     # Vector field for future use with embeddings
     embedding = db.Column(Vector(1536))
 
+    # Add client_msg_id field
+    client_msg_id = db.Column(db.String(100), nullable=True)
+
     # Link to either a user or a bot (one of these will be NULL)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
     bot_id = db.Column(db.Integer, db.ForeignKey("slack_bot.id"), nullable=True)

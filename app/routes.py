@@ -10,6 +10,7 @@ from flask import (
 from slack_sdk.errors import SlackApiError
 import openai  # Correct import for the OpenAI SDK
 from app import db, slack_client
+from flask import current_app
 from app.models import User, SlackBot, Message, Document
 import os
 from app.gpt_utils import ask_gpt
@@ -81,204 +82,219 @@ def slack_events():
         logger.info("Received challenge request from Slack")
         return jsonify({"challenge": data["challenge"]})
 
+    # Get the current app instance to pass to the thread
+    from flask import current_app
+
+    app = current_app._get_current_object()  # Get the actual app object, not the proxy
+
     # Start a background thread to process the event
     # This allows us to return a 200 response immediately
-    def process_event_async(event_data):
+    def process_event_async(event_data, flask_app):
         try:
-            # Process the event
-            process_slack_event(event_data)
+            # Process the event with the app context
+            with flask_app.app_context():
+                process_slack_event(event_data)
         except Exception as e:
             logger.error(f"Error processing event: {str(e)}", exc_info=True)
 
-    # Start the background processing
-    Thread(target=process_event_async, args=(data,)).start()
+    # Start the background processing with the app instance
+    Thread(target=process_event_async, args=(data, app)).start()
 
     # Return 200 OK immediately
     return "", 200
 
 
 # Extract the event processing logic into a separate function
-def process_slack_event(data):
-    # Log the raw request data
-    logger.info(f"Processing event data: {json.dumps(data, indent=2)}")
+def process_slack_event(event_data):
+    # Import current_app instead of app
+    from flask import current_app
 
-    # Process the event
-    if "event" in data:
-        event = data["event"]
-        logger.info(f"Processing event: {json.dumps(event, indent=2)}")
+    # Use current_app context for database operations
+    with current_app.app_context():
+        # Log the raw request data
+        logger.info(f"Processing event data: {json.dumps(event_data, indent=2)}")
 
-        # Add debug logging for the condition
-        logger.info(
-            f"Event type: {event.get('type')}, bot_id present: {bool(event.get('bot_id'))}"
-        )
+        # Process the event
+        if "event" in event_data:
+            event = event_data["event"]
+            logger.info(f"Processing event: {json.dumps(event, indent=2)}")
 
-        # Check if it's a message event or app_mention event and not from a bot (to avoid loops)
-        if (
-            event.get("type") == "message" or event.get("type") == "app_mention"
-        ) and not event.get("bot_id"):
-            # Extract message details
-            channel_id = event.get("channel")
-            user_id = event.get("user")
-            text = event.get("text", "")
-            ts = event.get("ts")
-            client_msg_id = event.get("client_msg_id")
-
-            # Check if this is a duplicate message using client_msg_id (most reliable)
-            if client_msg_id:
-                existing_message = Message.query.filter_by(
-                    client_msg_id=client_msg_id
-                ).first()
-
-                if existing_message:
-                    logger.info(
-                        f"Duplicate message detected with client_msg_id {client_msg_id}, skipping processing"
-                    )
-                    return
-            # Fallback to timestamp-based deduplication if client_msg_id is not available
-            else:
-                existing_message = Message.query.filter_by(
-                    channel=channel_id, timestamp=ts, is_bot=False
-                ).first()
-
-                if existing_message:
-                    logger.info(
-                        f"Duplicate message detected with timestamp {ts}, skipping processing"
-                    )
-                    return
-
+            # Add debug logging for the condition
             logger.info(
-                f"Received message from user {user_id} in channel {channel_id}: {text}"
+                f"Event type: {event.get('type')}, bot_id present: {bool(event.get('bot_id'))}"
             )
 
-            # Store the message in the database
-            user = User.query.filter_by(slack_user_id=user_id).first()
+            # Check if it's a message event or app_mention event and not from a bot (to avoid loops)
+            if (
+                event.get("type") == "message" or event.get("type") == "app_mention"
+            ) and not event.get("bot_id"):
+                # Extract message details
+                channel_id = event.get("channel")
+                user_id = event.get("user")
+                text = event.get("text", "")
+                ts = event.get("ts")
+                client_msg_id = event.get("client_msg_id")
 
-            # If user doesn't exist, create a new user record
-            if not user:
-                logger.info(
-                    f"User {user_id} not found in database, creating new user record"
-                )
-                # You might want to fetch user info from Slack API
-                try:
-                    user_info = slack_client.users_info(user=user_id)
-                    username = user_info["user"]["name"]
-                    email = user_info["user"]["profile"].get("email")
+                # Check if this is a duplicate message using client_msg_id (most reliable)
+                if client_msg_id:
+                    existing_message = Message.query.filter_by(
+                        client_msg_id=client_msg_id
+                    ).first()
 
-                    logger.info(
-                        f"Creating user with username: {username}, email: {email}"
-                    )
-                    user = User(slack_user_id=user_id, username=username, email=email)
-                    db.session.add(user)
-                    db.session.commit()
-                except SlackApiError as e:
-                    logger.error(f"Error fetching user info: {e}")
-                    username = f"user_{user_id}"
-                    user = User(slack_user_id=user_id, username=username)
-                    db.session.add(user)
-                    db.session.commit()
-
-            # Create and save the message with client_msg_id
-            message = Message(
-                channel=channel_id,
-                text=text,
-                timestamp=ts,
-                user_id=user.id,
-                is_bot=False,
-                client_msg_id=client_msg_id,  # Store the client_msg_id
-            )
-            db.session.add(message)
-            db.session.commit()
-            logger.info(f"Message saved with ID: {message.id}")
-
-            # For app_mention events, extract the mentioned bot directly from the event
-            if event.get("type") == "app_mention":
-                # Get the bot's user ID from the message
-                mentioned_bot_id = None
-                # Try to extract the bot ID from the text (format: <@BOT_ID>)
-                match = re.search(r"<@([A-Z0-9]+)>", text)
-                if match:
-                    mentioned_bot_id = match.group(1)
-                    logger.info(f"Bot mentioned with ID: {mentioned_bot_id}")
-
-                    # Find the bot in the database
-                    bot = SlackBot.query.filter_by(bot_id=mentioned_bot_id).first()
-                    if bot:
-                        logger.info(f"Found bot in database: {bot.name}")
-                        mentioned_bots = [bot]
-                    else:
-                        logger.warning(
-                            f"Bot with ID {mentioned_bot_id} not found in database"
+                    if existing_message:
+                        logger.info(
+                            f"Duplicate message detected with client_msg_id {client_msg_id}, skipping processing"
                         )
+                        return
+                # Fallback to timestamp-based deduplication if client_msg_id is not available
+                else:
+                    existing_message = Message.query.filter_by(
+                        channel=channel_id, timestamp=ts, is_bot=False
+                    ).first()
+
+                    if existing_message:
+                        logger.info(
+                            f"Duplicate message detected with timestamp {ts}, skipping processing"
+                        )
+                        return
+
+                logger.info(
+                    f"Received message from user {user_id} in channel {channel_id}: {text}"
+                )
+
+                # Store the message in the database
+                user = User.query.filter_by(slack_user_id=user_id).first()
+
+                # If user doesn't exist, create a new user record
+                if not user:
+                    logger.info(
+                        f"User {user_id} not found in database, creating new user record"
+                    )
+                    # You might want to fetch user info from Slack API
+                    try:
+                        user_info = slack_client.users_info(user=user_id)
+                        username = user_info["user"]["name"]
+                        email = user_info["user"]["profile"].get("email")
+
+                        logger.info(
+                            f"Creating user with username: {username}, email: {email}"
+                        )
+                        user = User(
+                            slack_user_id=user_id, username=username, email=email
+                        )
+                        db.session.add(user)
+                        db.session.commit()
+                    except SlackApiError as e:
+                        logger.error(f"Error fetching user info: {e}")
+                        username = f"user_{user_id}"
+                        user = User(slack_user_id=user_id, username=username)
+                        db.session.add(user)
+                        db.session.commit()
+
+                # Create and save the message with client_msg_id
+                message = Message(
+                    channel=channel_id,
+                    text=text,
+                    timestamp=ts,
+                    user_id=user.id,
+                    is_bot=False,
+                    client_msg_id=client_msg_id,  # Store the client_msg_id
+                )
+                db.session.add(message)
+                db.session.commit()
+                logger.info(f"Message saved with ID: {message.id}")
+
+                # For app_mention events, extract the mentioned bot directly from the event
+                if event.get("type") == "app_mention":
+                    # Get the bot's user ID from the message
+                    mentioned_bot_id = None
+                    # Try to extract the bot ID from the text (format: <@BOT_ID>)
+                    match = re.search(r"<@([A-Z0-9]+)>", text)
+                    if match:
+                        mentioned_bot_id = match.group(1)
+                        logger.info(f"Bot mentioned with ID: {mentioned_bot_id}")
+
+                        # Find the bot in the database
+                        bot = SlackBot.query.filter_by(bot_id=mentioned_bot_id).first()
+                        if bot:
+                            logger.info(f"Found bot in database: {bot.name}")
+                            mentioned_bots = [bot]
+                        else:
+                            logger.warning(
+                                f"Bot with ID {mentioned_bot_id} not found in database"
+                            )
+                            mentioned_bots = []
+                    else:
+                        logger.warning("Could not extract bot ID from app_mention text")
                         mentioned_bots = []
                 else:
-                    logger.warning("Could not extract bot ID from app_mention text")
-                    mentioned_bots = []
-            else:
-                # For regular messages, check if any bot was mentioned by name
-                bots = SlackBot.query.all()
-                mentioned_bots = [
-                    bot for bot in bots if bot.name.lower() in text.lower()
-                ]
+                    # For regular messages, check if any bot was mentioned by name
+                    bots = SlackBot.query.all()
+                    mentioned_bots = [
+                        bot for bot in bots if bot.name.lower() in text.lower()
+                    ]
 
-            if mentioned_bots:
+                if mentioned_bots:
+                    logger.info(
+                        f"Bots mentioned in message: {[bot.name for bot in mentioned_bots]}"
+                    )
+
+                    # Process each mentioned bot
+                    for bot in mentioned_bots:
+                        logger.info(f"Processing response for bot: {bot.name}")
+                        # Get the bot's documents for context
+                        documents = bot.documents
+                        context = " ".join([doc.content for doc in documents])
+                        logger.info(f"Context length: {len(context)} characters")
+
+                        try:
+                            # Generate a response using OpenAI
+                            logger.info(f"Calling OpenAI API for bot {bot.name}")
+                            response = ask_gpt(text, context, bot.name)
+                            logger.info(
+                                f"Received response from OpenAI: {response[:100]}..."
+                            )
+
+                            # Send the response back to Slack
+                            logger.info(
+                                f"Sending response to Slack channel {channel_id}"
+                            )
+                            slack_response = slack_client.chat_postMessage(
+                                channel=channel_id,
+                                text=response,
+                                thread_ts=ts,  # This will make it a thread reply
+                            )
+                            logger.info(
+                                f"Response sent to Slack, ts: {slack_response.get('ts')}"
+                            )
+
+                            # Store the bot's response in the database
+                            bot_message = Message(
+                                channel=channel_id,
+                                text=response,
+                                timestamp=slack_response.get("ts"),
+                                bot_id=bot.id,
+                                is_bot=True,
+                            )
+                            db.session.add(bot_message)
+                            db.session.commit()
+                            logger.info(f"Bot response saved with ID: {bot_message.id}")
+
+                        except Exception as e:
+                            logger.error(
+                                f"Error generating or sending response: {str(e)}",
+                                exc_info=True,
+                            )
+                else:
+                    logger.info("No bots were mentioned in the message")
+            else:
                 logger.info(
-                    f"Bots mentioned in message: {[bot.name for bot in mentioned_bots]}"
+                    "Ignoring event: not a user message/app_mention or sent by a bot"
                 )
-
-                # Process each mentioned bot
-                for bot in mentioned_bots:
-                    logger.info(f"Processing response for bot: {bot.name}")
-                    # Get the bot's documents for context
-                    documents = bot.documents
-                    context = " ".join([doc.content for doc in documents])
-                    logger.info(f"Context length: {len(context)} characters")
-
-                    try:
-                        # Generate a response using OpenAI
-                        logger.info(f"Calling OpenAI API for bot {bot.name}")
-                        response = ask_gpt(text, context, bot.name)
-                        logger.info(
-                            f"Received response from OpenAI: {response[:100]}..."
-                        )
-
-                        # Send the response back to Slack
-                        logger.info(f"Sending response to Slack channel {channel_id}")
-                        slack_response = slack_client.chat_postMessage(
-                            channel=channel_id,
-                            text=response,
-                            thread_ts=ts,  # This will make it a thread reply
-                        )
-                        logger.info(
-                            f"Response sent to Slack, ts: {slack_response.get('ts')}"
-                        )
-
-                        # Store the bot's response in the database
-                        bot_message = Message(
-                            channel=channel_id,
-                            text=response,
-                            timestamp=slack_response.get("ts"),
-                            bot_id=bot.id,
-                            is_bot=True,
-                        )
-                        db.session.add(bot_message)
-                        db.session.commit()
-                        logger.info(f"Bot response saved with ID: {bot_message.id}")
-
-                    except Exception as e:
-                        logger.error(
-                            f"Error generating or sending response: {str(e)}",
-                            exc_info=True,
-                        )
-            else:
-                logger.info("No bots were mentioned in the message")
         else:
-            logger.info(
-                "Ignoring event: not a user message/app_mention or sent by a bot"
-            )
-    else:
-        logger.info("No event data in the request")
+            logger.info("No event data in the request")
 
-    logger.info("Finished processing request")
+        logger.info("Finished processing request")
 
 
 # Dashboard

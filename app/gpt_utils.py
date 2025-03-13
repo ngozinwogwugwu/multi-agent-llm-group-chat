@@ -8,6 +8,7 @@ def ask_gpt(text, context, bot_name):
     Send a request to OpenAI's Chat Completions API
 
     Args:
+        text (str): The user's query
         context (str): The context from bot documents
         bot_name (str): The name of the bot
 
@@ -23,11 +24,19 @@ def ask_gpt(text, context, bot_name):
         "messages": [
             {
                 "role": "system",
-                "content": f"You are an assistant for the bot named {bot_name}. Use the following context to inform your responses.",
+                "content": f"You are an assistant for the bot named {bot_name}. Use the following context to inform your responses, but focus primarily on answering the user's query.",
             },
             {
                 "role": "user",
-                "content": f"{text}!! Given the following context: {context}",
+                "content": f"Here is some context information: {context}",
+            },
+            {
+                "role": "assistant",
+                "content": "I've reviewed this information and am ready to help with your question.",
+            },
+            {
+                "role": "user",
+                "content": text,
             },
         ],
     }
